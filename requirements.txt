@@ -1,5 +1,5 @@
 Plaintext
 
-streamlit
-yfinance
-pandas
+streamlit>=1.30.0
+yfinance==0.2.37
+pandas>=2.0.0
