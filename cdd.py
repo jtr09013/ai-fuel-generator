@@ -1,15 +1,13 @@
-# --- 修正後的數據顯示區段範例 ---
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+from datetime import datetime
 
-# 針對 VIX 的邏輯修改
+# 1. 必須先做這步設定
+st.set_page_config(page_title="AI 數據燃料生產器", layout="wide")
+
+# 2. 接著才開始寫標題
+st.title("🚀 AI 財經數據燃料生產器")
+
+# 3. 然後才是您的內容區塊
 st.subheader("📊 市場情緒指標")
-vix_value = 18.86 # 假設這是您抓到的即時數值
-if vix_value > 18:
-    vix_note = "恐慌情緒顯著升溫"
-else:
-    vix_note = "市場相對平穩"
-st.write(f"**VIX:** {vix_value} | **NOTE:** {vix_note}")
-
-# 針對 PCR 的邏輯修改
-pcr_value = 1.07
-prev_pcr = 0.452
-st.write(f"**PUT/CALL RATIO:** {pcr_value} | **NOTE:** 較前日（{prev_pcr}）大幅上升，避險情緒顯著升溫")
