@@ -291,7 +291,7 @@ SHORT_INTEREST:
 LAST_REPORT: 2026-05-30
 E_MINIS&P500_NET_COMMERCIAL: -125,000口
 E_MINIS&P500_NONCOM_NET: +98,000口
-# 註解：🚨[今日為週五，請AI強制聯網搜尋CFTC官網，確認當日最新公布的非商業與商業持倉淨變動數據]
+# 註解：🚨[請AI強制聯網搜尋CFTC官網，確認當日最新公布的非商業與商業持倉淨變動數據]
 </US_FUTURES_COT_AFTER>
 
 <US_MACRO_EVENTS_AFTER>
