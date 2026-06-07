@@ -6,11 +6,6 @@ import google.generativeai as genai
 from openai import OpenAI
 from duckduckgo_search import DDGS
 
-import google.generativeai as genai
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-st.write([m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods])
-
-
 # --- 核心軍師模組 ---
 
 def search_web(query):
@@ -20,7 +15,7 @@ def search_web(query):
 
 def analyst_ai(data):
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    model = genai.GenerativeModel('gemini-3.5-flash')
     news = search_web("美股與台股今日重點財經新聞")
     try:
         response = model.generate_content(f"請分析這些數據與新聞，給出專業觀點: {data} \n 新聞參考: {news}")
