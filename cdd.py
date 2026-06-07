@@ -409,55 +409,51 @@ MA_20_DAY: {ma20:.2f}
             else:
                 st.error("找不到該股票數據，請確認代號與市場選擇。")
 
-# --- 軍師接入點 ---
-st.divider()
-st.subheader("🤖 軍師團決策支援")
-
-# 1. 使用 session_state 來持久化您的數據，避免重新整理時數據消失
-if "context_data" not in st.session_state:
-    st.session_state.context_data = ""
-
-context_input = st.text_area("請貼入剛剛產生的燃料包數據（以便軍師研讀）：", 
-                            value=st.session_state.context_data, height=200)
-st.session_state.context_data = context_input
-
-# 2. 召喚按鈕邏輯
-if st.button("召喚軍師團進行分析"):
-    if st.session_state.context_data:
-        with st.status("軍師團研議中...", expanded=True) as status:
-            analysis_a = analyst_ai(st.session_state.context_data)
-            final_verdict = critic_ai(analysis_a)
-            
-            # 將結果存入狀態
-            st.session_state.analysis_a = analysis_a
-            st.session_state.final_verdict = final_verdict
-            st.session_state.show_revision = True
-            status.update(label="✅ 初步分析完成", state="complete")
-    else:
-        st.warning("請先產生並貼入數據！")
-
-# 3. 顯示結果與修正決策按鈕
+# 3. 顯示結果與修正決策按鈕 (升級版)
 if st.session_state.get("show_revision", False):
     st.markdown("### 📊 初步分析報告")
     st.write(st.session_state.analysis_a)
     st.info(f"### 🔍 軍師 B 的審查意見\n{st.session_state.final_verdict}")
     
-    # 主帥決定區：是否進行二次修正
-    if st.button("🔄 要求分析官針對質疑進行修正"):
+    # 使用欄位來放置「修正」與「直接審計」兩個按鈕
+    col_a, col_b = st.columns(2)
+    
+    # 流程 1: 要求修正
+    if col_a.button("🔄 要求分析官針對質疑進行修正"):
         with st.spinner("軍師修正中..."):
             correction_prompt = f"""
             風險評估官對您的報告提出以下質疑：{st.session_state.final_verdict}
             請針對這些缺漏與邏輯盲點，補上數據並重新撰寫分析報告。
             原始數據: {st.session_state.context_data}
             """
-            # 進行二次修正
-            new_analysis_a = analyst_ai(correction_prompt)
-            
-            # 更新顯示
-            st.markdown("---")
-            st.markdown("### 🔄 修正後的最終報告")
-            st.write(new_analysis_a)
-            st.success("決策報告已更新。")
-            
-            # 任務完成，關閉修正選項
-            st.session_state.show_revision = False
+            st.session_state.new_analysis_a = analyst_ai(correction_prompt)
+            st.rerun() # 重新執行頁面以顯示修正後的內容
+
+    # 如果已經產生了修正後的報告，顯示它並開啟審計選項
+    if "new_analysis_a" in st.session_state:
+        st.markdown("---")
+        st.markdown("### 🔄 修正後的最終報告")
+        st.write(st.session_state.new_analysis_a)
+        
+        # 流程 2: 最終審計與機器格式化輸出
+        if st.button("🔍 進行最後審計並轉化為機器決策數據包"):
+            with st.spinner("軍師 B 審計中..."):
+                audit_prompt = f"""
+                請對這份修正後的報告進行最終審計：
+                {st.session_state.new_analysis_a}
+                請嚴格輸出為 JSON 格式，不帶任何 Markdown 符號。
+                Schema: {{
+                    "risk_score": 1-10,
+                    "action": "Buy/Sell/Hold/Hedge",
+                    "allocation_percent": 0-100,
+                    "trigger_condition": "string",
+                    "reasoning": "string"
+                }}
+                """
+                st.session_state.machine_json = critic_ai(audit_prompt)
+                st.session_state.show_revision = False # 完成流程，關閉選項
+
+# 4. 最終呈現機器可讀格式
+if "machine_json" in st.session_state:
+    st.success("✅ 最終決策數據包已產生")
+    st.code(st.session_state.machine_json, language='json')
