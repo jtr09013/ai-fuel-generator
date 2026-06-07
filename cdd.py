@@ -377,3 +377,23 @@ MA_20_DAY: {ma20:.2f}
                 st.code(single_packet, language="text")
             else:
                 st.error("找不到該股票數據，請確認代號與市場選擇。")
+
+# --- 這裡開始是軍師接入點 ---
+st.divider() # 畫出一條分隔線
+if st.button("召喚軍師團進行分析"):
+    with st.spinner("軍師正在研讀數據與聯網搜集情報..."):
+        # 1. 準備數據內容 (這裡可以直接抓取你畫面上那些數據變數)
+        context_data = "..." # 把您的數據標籤內容放進來
+        
+        # 2. 軍師 A 開始分析 (比對數據+聯網)
+        analysis_a = analyst_ai(context_data) 
+        
+        # 3. 軍師 B 進行評估 (DeepSeek 審核)
+        final_verdict = critic_ai(analysis_a)
+        
+        # 4. 呈現結果
+        with st.expander("查看軍師團分析報告", expanded=True):
+            st.markdown("### 📊 軍師 A：資料分析官")
+            st.write(analysis_a)
+            st.markdown("### 🔍 軍師 B：DeepSeek 風險評估官")
+            st.info(final_verdict)
