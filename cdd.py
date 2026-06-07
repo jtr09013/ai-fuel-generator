@@ -2,16 +2,34 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
+import google.generativeai as genai
+from openai import OpenAI
+from duckduckgo_search import DDGS
 
-# --- 在檔案上方，主程式區塊之前加入 ---
+# --- 核心軍師模組 ---
+
+def search_web(query):
+    with DDGS() as ddgs:
+        results = list(ddgs.text(query, max_results=3))
+    return str(results)
 
 def analyst_ai(data):
-    # 這邊之後會接 Gemini API
-    return "這是分析師 AI 的初步分析報告..."
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    news = search_web("美股與台股今日重點財經新聞")
+    response = model.generate_content(f"請分析這些數據與新聞，給出專業觀點: {data} \n 新聞參考: {news}")
+    return response.text
 
 def critic_ai(analysis):
-    # 這邊之後會接 DeepSeek API
-    return "這是 DeepSeek 的最終評估與風險警示..."
+    client = OpenAI(api_key=st.secrets["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    response = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "system", "content": "你是一位專業的風險評估官，請針對分析官的報告進行嚴苛的邏輯審查，點出數據中可能存在的盲點。"},
+            {"role": "user", "content": f"分析官報告: {analysis}"}
+        ]
+    )
+    return response.choices[0].message.content
 
 # 網頁基本設定
 st.set_page_config(page_title="AI 數據燃料生產器 v4.4", layout="wide")
@@ -389,22 +407,23 @@ MA_20_DAY: {ma20:.2f}
                 st.error("找不到該股票數據，請確認代號與市場選擇。")
 
 # --- 這裡開始是軍師接入點 ---
-st.divider() # 畫出一條分隔線
-if st.button("召喚軍師團進行分析"):
-    with st.spinner("軍師正在研讀數據與聯網搜集情報..."):
-        # 1. 準備數據內容 (這裡可以直接抓取你畫面上那些數據變數)
-        context_data = "..." # 把您的數據標籤內容放進來
-        
-        # 2. 軍師 A 開始分析 (比對數據+聯網)
-        analysis_a = analyst_ai(context_data) 
-        
-        # 3. 軍師 B 進行評估 (DeepSeek 審核)
-        final_verdict = critic_ai(analysis_a)
-        
-        # 4. 呈現結果
-        with st.expander("查看軍師團分析報告", expanded=True):
-            st.markdown("### 📊 軍師 A：資料分析官")
-            st.write(analysis_a)
-            st.markdown("### 🔍 軍師 B：DeepSeek 風險評估官")
-            st.info(final_verdict)
+st.divider()
+st.subheader("🤖 軍師團決策支援")
+# 建立一個容器讓軍師讀取數據
+context_data = st.text_area("請貼入剛剛產生的燃料包數據（以便軍師研讀）：", height=200)
 
+if st.button("召喚軍師團進行分析"):
+    if context_data:
+        with st.spinner("軍師正在研讀數據與聯網搜集情報..."):
+            # 執行軍師對話鏈
+            analysis_a = analyst_ai(context_data) 
+            final_verdict = critic_ai(analysis_a)
+            
+            # 呈現結果
+            with st.expander("查看軍師團分析報告", expanded=True):
+                st.markdown("### 📊 軍師 A：資料分析官 (Gemini)")
+                st.write(analysis_a)
+                st.markdown("### 🔍 軍師 B：DeepSeek 風險評估官")
+                st.info(final_verdict)
+    else:
+        st.warning("請先產生並貼入數據，軍師才能進行分析喔！")
