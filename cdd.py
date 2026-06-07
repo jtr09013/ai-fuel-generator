@@ -406,68 +406,52 @@ MA_20_DAY: {ma20:.2f}
             else:
                 st.error("找不到該股票數據，請確認代號與市場選擇。")
 
-                # --- 軍師團決策支援模組 (取代原本結尾的接入點) ---
+                # --- 軍師團決策支援模組 (迭代優化版) ---
 st.divider()
 st.subheader("🤖 軍師團決策支援")
 
-# 初始化 session_state
-if "context_data" not in st.session_state: st.session_state.context_data = ""
-if "show_revision" not in st.session_state: st.session_state.show_revision = False
+# 初始化 session state
+if "analysis_log" not in st.session_state: st.session_state.analysis_log = []
+if "show_buttons" not in st.session_state: st.session_state.show_buttons = False
 
-# 1. 數據輸入框
-st.session_state.context_data = st.text_area(
-    "請貼入剛剛產生的數據燃料包：", 
-    value=st.session_state.context_data, 
-    height=200
-)
+context_data = st.text_area("請貼入數據燃料包：", height=150)
 
-# 2. 召喚與初步分析
-if st.button("召喚軍師團進行分析"):
-    if st.session_state.context_data:
-        with st.status("軍師團研議中...", expanded=True) as status:
-            analysis_a = analyst_ai(st.session_state.context_data)
-            final_verdict = critic_ai(analysis_a)
-            
-            st.session_state.analysis_a = analysis_a
-            st.session_state.final_verdict = final_verdict
-            st.session_state.show_revision = True
-            if "new_analysis_a" in st.session_state: del st.session_state.new_analysis_a
-            if "machine_json" in st.session_state: del st.session_state.machine_json
-            status.update(label="✅ 初步分析完成", state="complete")
-            st.rerun()
-    else:
-        st.warning("請先產生並貼入數據！")
+if st.button("🚀 開始軍師審議"):
+    with st.status("軍師團研議中...", expanded=True):
+        a1 = analyst_ai(context_data)
+        b1 = critic_ai(a1)
+        st.session_state.analysis_log.append({"report": a1, "critic": b1})
+        st.session_state.show_buttons = True
+        st.rerun()
 
-# 3. 審視初步報告與觸發修正
-if st.session_state.get("show_revision", False):
-    st.markdown("### 📊 初步分析報告")
-    st.write(st.session_state.analysis_a)
-    st.info(f"### 🔍 軍師 B 的審查意見\n{st.session_state.final_verdict}")
-    
-    col1, col2 = st.columns(2)
-    if col1.button("🔄 要求分析官針對質疑進行修正"):
-        with st.spinner("軍師修正中..."):
-            prompt = f"針對質疑：{st.session_state.final_verdict}，原始數據：{st.session_state.context_data}，請補強數據並修正報告。"
-            st.session_state.new_analysis_a = analyst_ai(prompt)
-            st.rerun()
+# 顯示最後一次的分析結果
+if st.session_state.analysis_log:
+    latest = st.session_state.analysis_log[-1]
+    st.markdown("### 📊 目前分析報告")
+    st.write(latest["report"])
+    st.info(f"### 🔍 軍師 B 的審查意見\n{latest['critic']}")
 
-# 4. 修正後報告與最終機器審計
-if "new_analysis_a" in st.session_state:
-    st.markdown("---")
-    st.markdown("### 🔄 修正後的最終報告")
-    st.write(st.session_state.new_analysis_a)
-    
-    if st.button("🔍 進行最後審計並輸出機器數據包 (JSON)"):
-        with st.spinner("軍師 B 審計與格式化中..."):
-            prompt = f"""
-            請審計這份修正後的報告，並輸出嚴格的 JSON 格式：
-            {st.session_state.new_analysis_a}
-            格式要求: {{ "risk_score": 1-10, "action": "...", "allocation_percent": int, "trigger": "...", "reasoning": "..." }}
-            """
-            st.session_state.machine_json = critic_ai(prompt)
-            st.rerun()
+    if st.session_state.show_buttons:
+        col1, col2 = st.columns(2)
+        
+        # 按鈕 1：修正
+        if col1.button("🔄 根據審查意見進行修正"):
+            with st.spinner("軍師修正中..."):
+                prompt = f"針對質疑：{latest['critic']}，原始數據：{context_data}，請補強數據並修正報告。"
+                new_a = analyst_ai(prompt)
+                new_b = critic_ai(new_a)
+                st.session_state.analysis_log.append({"report": new_a, "critic": new_b})
+                st.rerun()
+        
+        # 按鈕 2：強制輸出
+        if col2.button("✅ 內容無誤，強制輸出 JSON"):
+            with st.spinner("最後審計與格式化中..."):
+                prompt = f"將此報告轉換為嚴格的 JSON: {latest['report']}"
+                final_json = critic_ai(prompt)
+                st.session_state.final_json = final_json
+                st.rerun()
 
-# 5. 輸出結果
-if "machine_json" in st.session_state:
-    st.success("✅ 決策數據包已產生")
-    st.code(st.session_state.machine_json, language='json')
+# 最終結果輸出區
+if "final_json" in st.session_state:
+    st.success("🎉 決策數據包已產生！")
+    st.code(st.session_state.final_json, language='json')
