@@ -15,7 +15,7 @@ def search_web(query):
 
 def analyst_ai(data):
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
     news = search_web("美股與台股今日重點財經新聞")
     try:
         response = model.generate_content(f"請分析這些數據與新聞，給出專業觀點: {data} \n 新聞參考: {news}")
@@ -409,24 +409,38 @@ MA_20_DAY: {ma20:.2f}
             else:
                 st.error("找不到該股票數據，請確認代號與市場選擇。")
 
-# --- 這裡開始是軍師接入點 ---
+# --- 優化後的軍師接入點 ---
 st.divider()
 st.subheader("🤖 軍師團決策支援")
-# 建立一個容器讓軍師讀取數據
 context_data = st.text_area("請貼入剛剛產生的燃料包數據（以便軍師研讀）：", height=200)
 
 if st.button("召喚軍師團進行分析"):
     if context_data:
-        with st.spinner("軍師正在研讀數據與聯網搜集情報..."):
-            # 執行軍師對話鏈
-            analysis_a = analyst_ai(context_data) 
-            final_verdict = critic_ai(analysis_a)
-            
-            # 呈現結果
-            with st.expander("查看軍師團分析報告", expanded=True):
-                st.markdown("### 📊 軍師 A：資料分析官 (Gemini)")
-                st.write(analysis_a)
-                st.markdown("### 🔍 軍師 B：DeepSeek 風險評估官")
-                st.info(final_verdict)
+        # 使用 status 介面，讓使用者知道現在執行到哪
+        with st.status("軍師團正在運作中...", expanded=True) as status:
+            try:
+                status.write("分析官 (Gemini) 研讀中...")
+                analysis_a = analyst_ai(context_data)
+                
+                # 防呆機制：如果分析官回傳的是錯誤訊息，直接在這裡攔截
+                if "錯誤" in analysis_a or "NotFound" in analysis_a or "404" in analysis_a:
+                    status.update(label="❌ 分析官遇到技術問題", state="error", expanded=True)
+                    st.error("分析官無法執行任務，請檢查 API 設定或模型名稱。")
+                    st.text(analysis_a)
+                else:
+                    status.write("評估官 (DeepSeek) 進行邏輯審查...")
+                    final_verdict = critic_ai(analysis_a)
+                    
+                    status.update(label="✅ 分析完成！", state="complete", expanded=False)
+                    
+                    # 呈現結果
+                    with st.expander("查看軍師團分析報告", expanded=True):
+                        st.markdown("### 📊 軍師 A：資料分析官 (Gemini)")
+                        st.write(analysis_a)
+                        st.markdown("### 🔍 軍師 B：DeepSeek 風險評估官")
+                        st.info(final_verdict)
+            except Exception as e:
+                status.update(label="⚠️ 系統發生異常", state="error")
+                st.error(f"軍師團連接中斷: {str(e)}")
     else:
         st.warning("請先產生並貼入數據，軍師才能進行分析喔！")
