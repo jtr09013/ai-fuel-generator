@@ -307,38 +307,65 @@ VIX: {vix_p:.2f} ({vix_c:+.2f})
             st.success("✅ 美股數據包")
             st.code(output, language="text")
 
-# ----- 頁面3：個股單抓 -----
+# ----- 頁面3：個股單抓（詳細版） -----
 else:
     st.header("🔍 個股獨立資料包")
     market = st.radio("市場", ["台灣股市", "美國股市"], horizontal=True)
-    single_code = st.text_input("輸入股票代號", value="3374").strip().upper()
-    
+    single_code = st.text_input("輸入股票代號", value="3016").strip().upper()
+
     if st.button("⚡ 產生個股數據包", type="primary"):
         with st.spinner("抓取中..."):
             if market == "台灣股市":
-                # 優先嘗試即時，失敗則盤後
+                # 先嘗試即時，若失敗則盤後
                 res = get_tw_stock_realtime(single_code)
                 if not res:
                     res = get_tw_stock_after(single_code)
+
                 if res:
-                    news = get_yahoo_news_titles(f"{single_code}.TW", limit=2)
-                    output = f"""
-<單股分析>
-股票: {single_code}
-最新價: {res['price']:.2f}
-漲跌: {res['chg']:+.2f} ({res['pct']:+.2f}%)
-成交量: {res['vol']}
-新聞: {news if news else '無'}
-</單股分析>
-"""
-                    st.success(f"✅ {single_code} 資料")
+                    # 計算技術指標（MA5, MA20）
+                    ticker_yf = f"{single_code}.TW"
+                    try:
+                        hist = yf.Ticker(ticker_yf).history(period="60d")
+                        if not hist.empty and len(hist) >= 20:
+                            ma5 = hist['Close'].iloc[-5:].mean()
+                            ma20 = hist['Close'].iloc[-20:].mean()
+                        else:
+                            ma5 = ma20 = res['price']
+                    except Exception as e:
+                        st.warning(f"技術指標計算失敗: {e}")
+                        ma5 = ma20 = res['price']
+
+                    # 新聞標題
+                    news = get_yahoo_news_titles(ticker_yf, limit=3)
+                    news_str = news if news else "無重大新聞"
+
+                    # 建構詳細輸出
+                    output = f"""<SINGLE_STOCK_ANALYSIS_REQUEST>
+TICKER: {single_code}
+MARKET: TAIWAN
+
+[CURRENT_SESSION]
+PRICE_NOW: {res['price']:.2f} | PREV_CLOSE: {res['prev_close']:.2f}
+CHANGE: {res['chg']:+.2f} ({res['pct']:+.2f}%) | VOLUME: {res['vol']}
+
+[TECHNICAL_SNAPSHOT]
+MA_5_DAY: {ma5:.2f}
+MA_20_DAY: {ma20:.2f}
+
+[LATEST_NEWS_HEADLINES]
+{news_str}
+
+[CHIPS_AND_EVENTS_INSTRUCTION]
+AI_REQUIRED_TASK: 請AI強制聯網搜尋今日該台股最新的「法人買賣超」、「主力分點進出」並給出獨立操作建議。
+</SINGLE_STOCK_ANALYSIS_REQUEST>"""
+                    st.success(f"✅ {single_code} 詳細資料包")
                     st.code(output, language="text")
                 else:
-                    st.error("找不到該股票")
+                    st.error("找不到該股票數據")
             else:
-                # 美股
+                # 美股部分 (維持原本完整版，可依需求增加均線)
                 stock = yf.Ticker(single_code)
-                hist = stock.history(period="5d")
+                hist = stock.history(period="60d")
                 if len(hist) >= 2:
                     latest = hist.iloc[-1]
                     prev = hist.iloc[-2]
@@ -347,17 +374,29 @@ else:
                     chg = price - prev_close
                     pct = (chg / prev_close) * 100
                     vol_fmt = f"{latest['Volume']/10000:.2f}萬股"
-                    news = get_yahoo_news_titles(single_code, limit=2)
-                    output = f"""
-<單股分析>
-股票: {single_code}
-最新價: {price:.2f}
-漲跌: {chg:+.2f} ({pct:+.2f}%)
-成交量: {vol_fmt}
-新聞: {news if news else '無'}
-</單股分析>
-"""
-                    st.success(f"✅ {single_code} 資料")
+                    ma5 = hist['Close'].iloc[-5:].mean() if len(hist) >= 5 else price
+                    ma20 = hist['Close'].iloc[-20:].mean() if len(hist) >= 20 else price
+                    news = get_yahoo_news_titles(single_code, limit=3)
+                    news_str = news if news else "無重大新聞"
+                    output = f"""<SINGLE_STOCK_ANALYSIS_REQUEST>
+TICKER: {single_code}
+MARKET: USA
+
+[CURRENT_SESSION]
+PRICE_CLOSE: {price:.2f} | PREV_CLOSE: {prev_close:.2f}
+CHANGE: {chg:+.2f} ({pct:+.2f}%) | VOLUME: {vol_fmt}
+
+[TECHNICAL_SNAPSHOT]
+MA_5_DAY: {ma5:.2f}
+MA_20_DAY: {ma20:.2f}
+
+[LATEST_NEWS_HEADLINES]
+{news_str}
+
+[CHIPS_AND_EVENTS_INSTRUCTION]
+AI_REQUIRED_TASK: 請AI聯網搜尋最新消息，並結合大盤 VIX、期權動向給出獨立的操作建議。
+</SINGLE_STOCK_ANALYSIS_REQUEST>"""
+                    st.success(f"✅ {single_code} 詳細資料包")
                     st.code(output, language="text")
                 else:
-                    st.error("找不到該股票")
+                    st.error("找不到該股票數據")
