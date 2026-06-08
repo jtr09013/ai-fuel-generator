@@ -1,10 +1,20 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import google.generativeai as genai
 from openai import OpenAI
 from duckduckgo_search import DDGS
+from FinMind.data import DataLoader
+import requests
+
+# --- 初始化 FinMind ---
+try:
+    fm_token = st.secrets["FINMIND_TOKEN"]
+    fm = DataLoader()
+    fm.login_by_token(fm_token)
+except:
+    fm = DataLoader()
 
 # --- 核心軍師模組 ---
 
@@ -15,7 +25,6 @@ def search_web(query):
 
 def analyst_ai(data):
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    # 這裡將指引寫死在 System Instruction 中
     system_instruction = """
 你是一位頂尖的市場分析官。任務是基於結構化數據與新聞，輸出「客觀事實」與「主觀推測」分離的報告。
 嚴格遵守格式：
@@ -25,7 +34,7 @@ def analyst_ai(data):
 
 ### [推測與邏輯鏈]
 - 若 A (數據) 則 B (推測)，拆解推理過程。
-- 針對不確定性，給出具體機率預估（如：約 65%）。
+- 針對不確定性，給上具體機率預估（如：約 65%）。
 
 ### [結論摘要]
 - 對台股/個股的短線影響判斷（方向：漲/跌；強度：強/中/弱）。
@@ -38,7 +47,6 @@ def analyst_ai(data):
 
 def critic_ai(analysis):
     client = OpenAI(api_key=st.secrets["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
-    
     system_prompt = """
 你是一位嚴格的風險評估官，任務是對報告進行邏輯審計。請針對以下五大維度逐項檢查，若無問題標註「無異常」，若有疑慮請點出具體盲點並建議修正：
 1. 時間滯後：檢查數據是否過期。
@@ -57,46 +65,95 @@ def critic_ai(analysis):
     return response.choices[0].message.content
 
 # 網頁基本設定
-st.set_page_config(page_title="AI 數據燃料生產器 v4.4", layout="wide")
-st.title("🚀 AI 財經數據燃料生產器 (台美精準分流版)")
-st.caption("本系統已整合「台股個股前日收盤價 (PREV_CLOSE) 錨點機制」與「單一個股台美市場 AI 拷問指令自動分流邏輯」。")
+st.set_page_config(page_title="AI 數據燃料生產器 v4.5", layout="wide")
+st.title("🚀 AI 財經數據燃料生產器 (台股雙軌即時+美股Y精準版)")
+st.caption("台股升級：盤中採用證交所官方即時報價，盤後採用 FinMind 歷史清算數據。")
 
-# --- 核心數據抓取函式 ---
-def get_tw_index_data():
-    data = {"taiex_p": 0.0, "taiex_c": 0.0, "taiex_pct": 0.0, "taiex_v": "待計算",
-            "otc_p": 0.0, "otc_c": 0.0, "otc_pct": 0.0, "otc_v": "待確認"}
+# --- 核心數據抓取函式 (台股即時與盤後分流) ---
+
+def get_tw_index_data_realtime():
+    """ 盤中即時模式：利用證交所/櫃買官方公開快照 API 抓取完全零延遲大盤 """
+    data = {"taiex_p": 0.0, "taiex_c": 0.0, "taiex_pct": 0.0, "taiex_v": "查閱盤中",
+            "otc_p": 0.0, "otc_c": 0.0, "otc_pct": 0.0, "otc_v": "查閱盤中"}
     try:
-        taiex = yf.Ticker("^TWII").history(period="2d")
-        if not taiex.empty:
-            latest = taiex.iloc[-1]
-            data["taiex_p"] = latest['Close']
-            data["taiex_c"] = latest['Close'] - latest['Open']
-            data["taiex_pct"] = (data["taiex_c"] / latest['Open']) * 100
-            
-        otc = yf.Ticker("^TWOII").history(period="2d")
-        if not otc.empty:
-            latest = otc.iloc[-1]
-            data["otc_p"] = latest['Close']
-            data["otc_c"] = latest['Close'] - latest['Open']
-            data["otc_pct"] = (data["otc_c"] / latest['Open']) * 100
+        # 抓取上市大盤即時
+        r = requests.get("https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw", timeout=5)
+        res = r.json()
+        if "msgArray" in res and len(res["msgArray"]) > 0:
+            info = res["msgArray"][0]
+            # z: 當盤成交價, y: 昨收價
+            current = float(info.get('z', info.get('o', 0)))
+            y_close = float(info.get('y', 0))
+            if y_close > 0 and current > 0:
+                data["taiex_p"] = current
+                data["taiex_c"] = current - y_close
+                data["taiex_pct"] = (data["taiex_c"] / y_close) * 100
+
+        # 抓取櫃買即時 (otc)
+        r_otc = requests.get("https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_o00.tw", timeout=5)
+        res_otc = r_otc.json()
+        if "msgArray" in res_otc and len(res_otc["msgArray"]) > 0:
+            info_o = res_otc["msgArray"][0]
+            current_o = float(info_o.get('z', info_o.get('o', 0)))
+            y_close_o = float(info_o.get('y', 0))
+            if y_close_o > 0 and current_o > 0:
+                data["otc_p"] = current_o
+                data["otc_c"] = current_o - y_close_o
+                data["otc_pct"] = (data["otc_c"] / y_close_o) * 100
     except:
         pass
     return data
+
+def get_tw_index_data_after():
+    """ 盤後模式：完全使用 FinMind 數據 """
+    data = {"taiex_p": 0.0, "taiex_c": 0.0, "taiex_pct": 0.0, "taiex_v": "待計算",
+            "otc_p": 0.0, "otc_c": 0.0, "otc_pct": 0.0, "otc_v": "待確認"}
+    try:
+        end_date = datetime.today().strftime('%Y-%m-%d')
+        start_date = (datetime.today() - timedelta(days=7)).strftime('%Y-%m-%d')
+        df_taiex = fm.taiwan_stock_daily(stock_id='0000', start_date=start_date, end_date=end_date)
+        if not df_taiex.empty and len(df_taiex) >= 2:
+            latest = df_taiex.iloc[-1]
+            prev = df_taiex.iloc[-2]
+            data["taiex_p"] = latest['close']
+            data["taiex_c"] = latest['close'] - prev['close']
+            data["taiex_pct"] = (data["taiex_c"] / prev['close']) * 100
+    except:
+        pass
+    return data
+
+def get_tw_stock_realtime(ticker):
+    """ 盤中即時個股抓取 (證交所官方 API) """
+    try:
+        # 同時嘗試上市(tse)與上櫃(otc)標記
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_{ticker}.tw|otc_{ticker}.tw"
+        res = requests.get(url, timeout=5).json()
+        if "msgArray" in res and len(res["msgArray"]) > 0:
+            info = res["msgArray"][0]
+            # z=當前成交價, y=昨收, v=當盤總量(張), o=開盤
+            curr = float(info.get('z', info.get('o', 0)))
+            y_close = float(info.get('y', 0))
+            vol = info.get('v', '0')
+            
+            chg = curr - y_close
+            pct = (chg / y_close) * 100 if y_close > 0 else 0.0
+            return {"price": curr, "prev_close": y_close, "chg": chg, "pct": pct, "vol": f"{float(vol)/1000:.2f}萬張" if vol.isdigit() else "0萬張"}
+    except:
+        pass
+    return None
 
 def get_us_index_data():
     indices = {"DOW": "^DJI", "NAS": "^IXIC", "SPX": "^GSPC", "SOX": "^SOX"}
     data = {}
     for name, ticker in indices.items():
         try:
-            df = yf.Ticker(ticker).history(period="2d")
-            if not df.empty:
+            df = yf.Ticker(ticker).history(period="5d")
+            if len(df) >= 2:
                 latest = df.iloc[-1]
-                chg = latest['Close'] - latest['Open']
-                pct = (chg / latest['Open']) * 100
-                data[name] = {
-                    "p": latest['Close'], "c": chg, "pct": pct,
-                    "h": latest['High'], "l": latest['Low']
-                }
+                prev = df.iloc[-2]
+                chg = latest['Close'] - prev['Close']
+                pct = (chg / prev['Close']) * 100
+                data[name] = {"p": latest['Close'], "c": chg, "pct": pct, "h": latest['High'], "l": latest['Low']}
             else:
                 data[name] = {"p": 0.0, "c": 0.0, "pct": 0.0, "h": 0.0, "l": 0.0}
         except:
@@ -106,45 +163,35 @@ def get_us_index_data():
 def get_macro_raw():
     macro = {"WTI": 0.0, "WTI_CHG": 0.0, "US10Y": 0.0, "US10Y_CHG_BPS": 0.0, "DXY": 0.0, "DXY_CHG": 0.0}
     try:
-        wti = yf.Ticker("CL=F").history(period="2d")
-        if not wti.empty:
-            latest = wti.iloc[-1]
-            macro["WTI"] = latest['Close']
-            macro["WTI_CHG"] = ((latest['Close'] - latest['Open']) / latest['Open']) * 100
-        
-        tnx = yf.Ticker("^TNX").history(period="2d")
+        wti = yf.Ticker("CL=F").history(period="5d")
+        if len(wti) >= 2:
+            macro["WTI"] = wti['Close'].iloc[-1]
+            macro["WTI_CHG"] = ((wti['Close'].iloc[-1] - wti['Close'].iloc[-2]) / wti['Close'].iloc[-2]) * 100
+        tnx = yf.Ticker("^TNX").history(period="5d")
         if len(tnx) >= 2:
             macro["US10Y"] = tnx['Close'].iloc[-1]
-            chg_pct = tnx['Close'].iloc[-1] - tnx['Close'].iloc[-2]
-            macro["US10Y_CHG_BPS"] = chg_pct * 100  
-            
-        dxy = yf.Ticker("DX-Y.NYB").history(period="2d")
-        if not dxy.empty:
-            latest = dxy.iloc[-1]
-            macro["DXY"] = latest['Close']
-            macro["DXY_CHG"] = ((latest['Close'] - latest['Open']) / latest['Open']) * 100
+            macro["US10Y_CHG_BPS"] = (tnx['Close'].iloc[-1] - tnx['Close'].iloc[-2]) * 100  
+        dxy = yf.Ticker("DX-Y.NYB").history(period="5d")
+        if len(dxy) >= 2:
+            macro["DXY"] = dxy['Close'].iloc[-1]
+            macro["DXY_CHG"] = ((dxy['Close'].iloc[-1] - dxy['Close'].iloc[-2]) / dxy['Close'].iloc[-2]) * 100
     except:
         pass
     return macro
 
 def get_vix_data():
     try:
-        vix = yf.Ticker("^VIX").history(period="2d")
-        if not vix.empty:
-            latest = vix.iloc[-1]
-            return latest['Close'], (latest['Close'] - latest['Open'])
-    except:
-        pass
+        vix = yf.Ticker("^VIX").history(period="5d")
+        if len(vix) >= 2: return vix['Close'].iloc[-1], (vix['Close'].iloc[-1] - vix['Close'].iloc[-2])
+    except: pass
     return 0.0, 0.0
 
 def get_yahoo_news_titles(ticker, limit=1):
     try:
         stock = yf.Ticker(ticker)
-        news_list = stock.news[:limit]
-        titles = [n.get('title', '').strip() for n in news_list if n.get('title')]
-        return "、".join([f"{t}" for t in titles]) if titles else ""
-    except:
-        return ""
+        titles = [n.get('title', '').strip() for n in stock.news[:limit] if n.get('title')]
+        return "、".join(titles) if titles else ""
+    except: return ""
 
 # --- 介面分流頁籤 ---
 tab1, tab2, tab3 = st.tabs(["🟢 台灣股市大包", "🔵 美國股市大包", "🔍 個股獨立單抓"])
@@ -159,39 +206,18 @@ with tab1:
     
     if st.button("🔥 產生台股融合數據包"):
         with st.spinner("正在打包台股數據..."):
-            idx = get_tw_index_data()
             macro = get_macro_raw()
-            
             watchlist_text = ""
             ticker_list = [t.strip() for t in tw_watchlist_input.split(",") if t.strip()]
             
-            for t in ticker_list:
-                formatted_ticker = f"{t}.TW"
-                stock = yf.Ticker(formatted_ticker)
-                hist = stock.history(period="2d")
-                info = stock.info
-                if not hist.empty:
-                    latest = hist.iloc[-1]
-                    chg = latest['Close'] - latest['Open']
-                    pct = (chg / latest['Open']) * 100
-                    
-                    # 🔴 核心優化：從現有 2d 歷史數據中安全撈取「前日收盤價」作為 AI 計算錨點
-                    prev_close = hist['Close'].iloc[-2] if len(hist) >= 2 else latest['Open']
-                    
-                    # 換算「萬張」公式 = Volume / 10000000
-                    vol_tw_val = latest['Volume'] / 10000000
-                    vol_w = f"{vol_tw_val:.2f}萬張"
-                    
-                    name = info.get('shortName', f"個股_{t}")
-                    news_summary = get_yahoo_news_titles(formatted_ticker, limit=1)
-                    
-                    if "盤中即時" in tw_time_mode:
-                        watchlist_text += f"{name}({t}): NOW: {latest['Close']:.2f} | PREV_CLOSE: {prev_close:.2f} | CHG: {chg:+.2f} ({pct:+.2f}%) | EST_VOL: {vol_w}\n"
-                    else:
-                        news_str = f" | NEWS: {news_summary}" if news_summary else ""
-                        watchlist_text += f"{name}({t}): CLOSE: {latest['Close']:.2f} | PREV_CLOSE: {prev_close:.2f} | CHG: {chg:+.2f} ({pct:+.2f}%) | VOL: {vol_w}{news_str} | FOREIGN_NET: \n"
-            
             if "盤中即時" in tw_time_mode:
+                # 盤中：改用官方證交所完全即時報價
+                idx = get_tw_index_data_realtime()
+                for t in ticker_list:
+                    res = get_tw_stock_realtime(t)
+                    if res:
+                        watchlist_text += f"個股_{t}({t}): NOW: {res['price']:.2f} | PREV_CLOSE: {res['prev_close']:.2f} | CHG: {res['chg']:+.2f} ({res['pct']:+.2f}%) | EST_VOL: {res['vol']}\n"
+                
                 final_tw = f"""<TW_MARKET_OVERVIEW_INTRA>
 TAIEX_NOW: {idx['taiex_p']:.2f} | CHG: {idx['taiex_c']:+.2f} ({idx['taiex_pct']:+.2f}%) | EST_VOL: {idx['taiex_v']}
 OTC_NOW: {idx['otc_p']:.2f} | CHG: {idx['otc_c']:+.2f} ({idx['otc_pct']:+.2f}%) | EST_VOL: {idx['otc_v']}
@@ -207,7 +233,25 @@ OIL_WTI: {macro['WTI']:.2f} ({macro['WTI_CHG']:+.1f}%)
 MIDEAST: 美伊衝突升溫，談判仍陷僵局
 FOMC_WATCH: 7月升息機率約11% (請AI聯網交互驗證)
 </MACRO_EVENTS_INTRA>"""
+            
             else:
+                # 盤後：採用 FinMind 歷史清算數據
+                idx = get_tw_index_data_after()
+                end_date = datetime.today().strftime('%Y-%m-%d')
+                start_date = (datetime.today() - timedelta(days=7)).strftime('%Y-%m-%d')
+                
+                for t in ticker_list:
+                    df_hist = fm.taiwan_stock_daily(stock_id=t, start_date=start_date, end_date=end_date)
+                    if not df_hist.empty and len(df_hist) >= 2:
+                        latest = df_hist.iloc[-1]
+                        prev_close = df_hist['close'].iloc[-2]
+                        chg = latest['close'] - prev_close
+                        pct = (chg / prev_close) * 100
+                        vol_w = f"{latest['Trading_Volume'] / 10000000:.2f}萬張"
+                        news_summary = get_yahoo_news_titles(f"{t}.TW", limit=1)
+                        news_str = f" | NEWS: {news_summary}" if news_summary else ""
+                        watchlist_text += f"個股_{t}({t}): CLOSE: {latest['close']:.2f} | PREV_CLOSE: {prev_close:.2f} | CHG: {chg:+.2f} ({pct:+.2f}%) | VOL: {vol_w}{news_str} | FOREIGN_NET: \n"
+                
                 final_tw = f"""<TW_MARKET_OVERVIEW_AFTER>
 TAIEX_CLOSE: {idx['taiex_p']:.2f} | CHG: {idx['taiex_c']:+.2f} ({idx['taiex_pct']:+.2f}%) | VOL: {idx['taiex_v']}
 OTC_CLOSE: {idx['otc_p']:.2f} | CHG: {idx['otc_c']:+.2f} ({idx['otc_pct']:+.2f}%) | VOL: {idx['otc_v']}
@@ -246,7 +290,7 @@ US_10Y_YIELD: {macro['US10Y']:.2f}%
             st.code(final_tw, language="text")
 
 # ==========================================
-# 🔵 頁籤二：美股大盤 + 關注個股
+# 🔵 頁籤二：美股大盤 + 關注個股 (維持 yfinance)
 # ==========================================
 with tab2:
     st.header("美股大盤 + 關注個股綜合燃料包")
@@ -258,158 +302,119 @@ with tab2:
             us_idx = get_us_index_data()
             macro = get_macro_raw()
             vix_p, vix_c = get_vix_data()
-            
             us_watchlist_text = ""
             us_ticker_list = [u.strip().upper() for u in us_watchlist_input.split(",") if u.strip()]
             
             for ut in us_ticker_list:
                 stock = yf.Ticker(ut)
-                hist = stock.history(period="2d")
-                info = stock.info
-                if not hist.empty:
+                hist = stock.history(period="5d")
+                if len(hist) >= 2:
                     latest = hist.iloc[-1]
-                    chg_pct = ((latest['Close'] - latest['Open']) / latest['Open']) * 100
-                    
-                    # 美股 1億股 = 10000萬股。故直接除以 10,000 即為「萬股」
+                    u_prev_close = hist['Close'].iloc[-2]
+                    chg_pct = ((latest['Close'] - u_prev_close) / u_prev_close) * 100
                     vol_val = latest['Volume'] / 10000
                     vol_m = f"{vol_val:,.0f}萬股" if vol_val >= 1000 else f"{vol_val:.2f}萬股"
                     
                     if "盤中即時" in us_time_mode:
-                        inst_str = " | INST_OWN_PCT: 約65%" if ut == "NVDA" else ""
-                        us_watchlist_text += f"{ut}: PRICE: {latest['Close']:.2f} | CHG: {chg_pct:+.2f}% | VOL: {vol_m}{inst_str}\n"
+                        us_watchlist_text += f"{ut}: PRICE: {latest['Close']:.2f} | CHG: {chg_pct:+.2f}% | VOL: {vol_m}\n"
                     else:
                         news_summary = get_yahoo_news_titles(ut, limit=1)
                         news_str = f" | NEWS: {news_summary}" if news_summary else " | NEWS: "
-                        inst_str = " | INST_OWN_PCT: 約65%" if ut == "NVDA" else ""
-                        us_watchlist_text += f"{ut}: PRICE: {latest['Close']:.2f} | CHG: {chg_pct:+.2f}% | VOL: {vol_m}{inst_str}{news_str}\n"
+                        us_watchlist_text += f"{ut}: PRICE: {latest['Close']:.2f} | CHG: {chg_pct:+.2f}% | VOL: {vol_m}{news_str}\n"
 
             if "盤中即時" in us_time_mode:
                 final_us = f"""<US_MARKET_OVERVIEW>
-DOW: {us_idx['DOW']['p']:.2f} | CHG: {us_idx['DOW']['c']:+.2f} ({us_idx['DOW']['pct']:+.2f}%) | HIGH: {us_idx['DOW']['h']:.2f} | LOW: {us_idx['DOW']['l']:.2f}
+DOW: {us_idx['DOW']['p']:.2f} | CHG: {us_idx['DOW']['c']:+.2f} ({us_idx['DOW']['pct']:+.2f}%)
 NAS: {us_idx['NAS']['p']:.2f} | CHG: {us_idx['NAS']['c']:+.2f} ({us_idx['NAS']['pct']:+.2f}%)
 SPX: {us_idx['SPX']['p']:.2f} | CHG: {us_idx['SPX']['c']:+.2f} ({us_idx['SPX']['pct']:+.2f}%)
 SOX: {us_idx['SOX']['p']:.2f} | CHG: {us_idx['SOX']['c']:+.2f} ({us_idx['SOX']['pct']:+.2f}%)
-VOL_NYSE: 約45億股 | NASDAQ: 約52億股
 </US_MARKET_OVERVIEW>
 
 <US_SENTIMENT>
-VIX: {vix_p:.2f} | CHG: {vix_c:+.2f} | NOTE: 仍在歷史低位
-PUT_CALL_RATIO: 1.07 | CHG: +0.618 | NOTE: 選擇權市場避險情緒顯著升溫
-MARGIN_DEBT: (每月公布，FINRA報告)
-SHORT_INTEREST: (每兩周公布)
+VIX: {vix_p:.2f} | CHG: {vix_c:+.2f}
+PUT_CALL_RATIO: 1.07
 </US_SENTIMENT>
 
 <STOCK_WATCHLIST>
 {us_watchlist_text.strip()}
 </STOCK_WATCHLIST>
 
-<FUTURES_COT>
-LAST_REPORT: 2026-05-30
-E_MINIS&P500_NET_COMMERCIAL: -125,000口 (商業空頭)
-E_MINIS&P500_NONCOM_NET: +98,000口 (投機淨多頭)
-NOTE: 反映大戶期貨留倉動向，最新報告請AI聯網查證。
-</FUTURES_COT>
-
 <MACRO_EVENTS>
 DXY: {macro['DXY']:.2f} | CHG: {macro['DXY_CHG']:+.2f}%
-FED_RATE_EXPECT: CME FedWatch顯示7月升息機率約11%，年底前約55%
 OIL_WTI: {macro['WTI']:.2f} | CHG: {macro['WTI_CHG']:+.1f}%
-US_10Y_YIELD: {macro['US10Y']:.2f}% | CHG: {macro['US10Y_CHG_BPS']:+.2f}bps
-MIDEAST_TALKS: 美伊衝突持續，談判陷入僵局，油價劇烈波動
+US_10Y_YIELD: {macro['US10Y']:.2f}%
 </MACRO_EVENTS>"""
             else:
                 final_us = f"""<US_MARKET_OVERVIEW_AFTER>
-DOW: {us_idx['DOW']['p']:.2f} | CHG: {us_idx['DOW']['c']:+.2f} ({us_idx['DOW']['pct']:+.2f}%) | HIGH: {us_idx['DOW']['h']:.2f} | LOW: {us_idx['DOW']['l']:.2f}
+DOW: {us_idx['DOW']['p']:.2f} | CHG: {us_idx['DOW']['c']:+.2f} ({us_idx['DOW']['pct']:+.2f}%)
 NAS: {us_idx['NAS']['p']:.2f} | CHG: {us_idx['NAS']['c']:+.2f} ({us_idx['NAS']['pct']:+.2f}%)
 SPX: {us_idx['SPX']['p']:.2f} | CHG: {us_idx['SPX']['c']:+.2f} ({us_idx['SPX']['pct']:+.2f}%)
 SOX: {us_idx['SOX']['p']:.2f} | CHG: {us_idx['SOX']['c']:+.2f} ({us_idx['SOX']['pct']:+.2f}%)
-VOL_NYSE: 約45億股 | NASDAQ: 約52億股
-# 註解：此為最終收盤數據。
 </US_MARKET_OVERVIEW_AFTER>
 
 <US_SENTIMENT_AFTER>
 VIX: {vix_p:.2f} | CHG: {vix_c:+.2f}
-PUT_CALL_RATIO: 1.07 | CHG: +0.618
-MARGIN_DEBT: 
-SHORT_INTEREST: 
-# 註解：⚠️[請AI強制聯網確認今日FINRA最新融資餘額與近兩週最新券商放空餘額數據]
+PUT_CALL_RATIO: 1.07
 </US_SENTIMENT_AFTER>
 
 <US_STOCK_WATCHLIST_AFTER>
 {us_watchlist_text.strip()}
-# 註解：個股若無重大新聞則留空；請AI聯網補上今日盤後各大投行對上述個股的評級變動或重大公告。
 </US_STOCK_WATCHLIST_AFTER>
-
-<US_FUTURES_COT_AFTER>
-LAST_REPORT: 2026-05-30
-E_MINIS&P500_NET_COMMERCIAL: -125,000口
-E_MINIS&P500_NONCOM_NET: +98,000口
-# 註解：🚨[請AI強制聯網搜尋CFTC官網，確認當日最新公布的非商業與商業持倉淨變動數據]
-</US_FUTURES_COT_AFTER>
 
 <US_MACRO_EVENTS_AFTER>
 DXY: {macro['DXY']:.2f} | CHG: {macro['DXY_CHG']:+.2f}%
 OIL_WTI: {macro['WTI']:.2f} | CHG: {macro['WTI_CHG']:+.1f}%
-US_10Y_YIELD: {macro['US10Y']:.2f}% | CHG: {macro['US10Y_CHG_BPS']:+.2f}bps
-FED_RATE_EXPECT: CME FedWatch顯示7月升息機率約11%
-MIDEAST_TALKS: 
-# 註解：🌍[請AI強制聯網搜尋收盤後最新的國際總經、聯準會官員談話與國際衝突事件]
+US_10Y_YIELD: {macro['US10Y']:.2f}%
 </US_MACRO_EVENTS_AFTER>"""
 
             st.success("🎉 美股燃料包輸出成功！")
             st.code(final_us, language="text")
 
 # ==========================================
-# 🔍 頁籤三：個股獨立單抓與輸出 (單獨詢問用)
+# 🔍 頁籤三：個股獨立單抓與輸出
 # ==========================================
 with tab3:
     st.header("🔍 個股獨立單抓工具")
-    st.caption("當您只想針對某一檔股票單獨拷問 AI 時使用。")
-    
     market_type = st.radio("股票市場類型", ["台灣股市 (TW Stock)", "美國股市 (US Stock)"], horizontal=True)
-    single_ticker = st.text_input("輸入單一股票代號 (例如: 2330 或 NVDA)", value="2330").upper().strip()
+    single_ticker = st.text_input("輸入單一股票代號", value="2330").upper().strip()
     
     if st.button("⚡ 產生單一個股專屬 AI 數據包"):
-        with st.spinner(f"正在抽取 {single_ticker} 的獨立數據燃料..."):
-            yf_ticker = f"{single_ticker}.TW" if market_type == "台灣股市 (TW Stock)" else single_ticker
-            stock = yf.Ticker(yf_ticker)
-            hist = stock.history(period="5d")
-            info = stock.info
+        with st.spinner(f"正在抽取 {single_ticker} 的數據..."):
+            valid = False
             
-            if not hist.empty:
-                latest = hist.iloc[-1]
-                chg = latest['Close'] - latest['Open']
-                pct = (chg / latest['Open']) * 100
-                
-                # 🔴 核心優化 1：台美股個股數據與指令邏輯全面精準分流
-                if market_type == "台灣股市 (TW Stock)":
-                    vol_tw_single = latest['Volume'] / 10000000
-                    vol_formatted = f"{vol_tw_single:.2f}萬張"
+            if market_type == "台灣股市 (TW Stock)":
+                # 即時查詢使用官方 API，取得當日主要波動
+                res = get_tw_stock_realtime(single_ticker)
+                if res:
+                    price_line = f"PRICE_NOW: {res['price']:.2f} | PREV_CLOSE: {res['prev_close']:.2f}"
+                    chg, pct, vol_formatted = res['chg'], res['pct'], res['vol']
+                    # MA 歷史計算由 FinMind 支援
+                    start_date = (datetime.today() - timedelta(days=90)).strftime('%Y-%m-%d')
+                    df_hist = fm.taiwan_stock_daily(stock_id=single_ticker, start_date=start_date, end_date=datetime.today().strftime('%Y-%m-%d'))
+                    ma5 = df_hist['close'].iloc[-5:].mean() if len(df_hist) >= 5 else res['price']
+                    ma20 = df_hist['close'].iloc[-20:].mean() if len(df_hist) >= 20 else res['price']
+                    single_news = get_yahoo_news_titles(f"{single_ticker}.TW", limit=3)
+                    instruction_text = "⚠️提示：請AI強制聯網搜尋今日該台股最新的「法人買賣超」、「主力分點進出」並給出獨立操作建議。"
+                    valid = True
+            else:
+                stock = yf.Ticker(single_ticker)
+                hist = stock.history(period="60d")
+                if not hist.empty and len(hist) >= 2:
+                    latest = hist.iloc[-1]
+                    u_s_prev_close = hist['Close'].iloc[-2]
+                    chg = latest['Close'] - u_s_prev_close
+                    pct = (chg / u_s_prev_close) * 100
+                    vol_formatted = f"{latest['Volume']/10000:.2f}萬股"
+                    price_line = f"PRICE_CLOSE: {latest['Close']:.2f} | OPEN: {latest['Open']:.2f}"
+                    ma5 = hist['Close'].iloc[-5:].mean()
+                    ma20 = hist['Close'].iloc[-20:].mean()
+                    single_news = get_yahoo_news_titles(single_ticker, limit=3)
+                    instruction_text = "⚠️提示：請AI聯網搜尋最新消息，並結合大盤 VIX、期權動向給出獨立的操作建議。"
+                    valid = True
                     
-                    # 強制加固台股專屬前日收盤價錨點
-                    s_prev_close = hist['Close'].iloc[-2] if len(hist) >= 2 else latest['Open']
-                    price_line = f"PRICE_CLOSE: {latest['Close']:.2f} | PREV_CLOSE: {s_prev_close:.2f} | OPEN: {latest['Open']:.2f} | HIGH: {latest['High']:.2f} | LOW: {latest['Low']:.2f}"
-                    
-                    # 台股籌碼面、分點拷問指令
-                    instruction_text = "⚠️提示：此為單一個股獨立查詢。請AI強制聯網搜尋今日該個股最新的「法人買賣超籌碼面」、「主力分點進出明細」並結合最新公告給出獨立的操作建議。"
-                else:
-                    s_vol_val = latest['Volume'] / 10000
-                    vol_formatted = f"{s_vol_val:,.0f}萬股" if s_vol_val >= 1000 else f"{s_vol_val:.2f}萬股"
-                    
-                    # 美股維持標準現況輸出 (不強制加註 PREV_CLOSE)
-                    price_line = f"PRICE_CLOSE: {latest['Close']:.2f} | OPEN: {latest['Open']:.2f} | HIGH: {latest['High']:.2f} | LOW: {latest['Low']:.2f}"
-                    
-                    # 🔴 核心優化 2：美股精準專屬指令（自動略過每日三大法人與分點，改抓美股特有宏觀指標）
-                    instruction_text = "⚠️提示：此為單一個股獨立查詢。請AI強制聯網搜尋該個股最新消息，並結合大盤 VIX、Put/Call Ratio、近期期權大單異動或機構持倉流向（13F 季報）給出獨立的操作建議。（註：美股無台股每日法人與分點數據，請勿虛構）。"
-                
-                hist_60 = stock.history(period="60d")
-                ma5 = hist_60['Close'].iloc[-5:].mean() if len(hist_60) >= 5 else 0
-                ma20 = hist_60['Close'].iloc[-20:].mean() if len(hist_60) >= 20 else 0
-                single_news = get_yahoo_news_titles(yf_ticker, limit=3)
-                
+            if valid:
                 single_packet = f"""<SINGLE_STOCK_ANALYSIS_REQUEST>
 TICKER: {single_ticker}
-NAME: {info.get('shortName', 'N/A')}
 MARKET: {'TAIWAN' if market_type == "台灣股市 (TW Stock)" else 'USA'}
 
 [CURRENT_SESSION]
@@ -429,13 +434,12 @@ MA_20_DAY: {ma20:.2f}
                 st.success(f"🎉 {single_ticker} 專屬數據包已就緒！")
                 st.code(single_packet, language="text")
             else:
-                st.error("找不到該股票數據，請確認代號與市場選擇。")
+                st.error("找不到該股票數據。")
 
-                # --- 軍師團決策支援模組 (迭代優化版) ---
+# --- 軍師團決策支援模組 ---
 st.divider()
 st.subheader("🤖 軍師團決策支援")
 
-# 初始化 session state
 if "analysis_log" not in st.session_state: st.session_state.analysis_log = []
 if "show_buttons" not in st.session_state: st.session_state.show_buttons = False
 
@@ -449,7 +453,6 @@ if st.button("🚀 開始軍師審議"):
         st.session_state.show_buttons = True
         st.rerun()
 
-# 顯示最後一次的分析結果
 if st.session_state.analysis_log:
     latest = st.session_state.analysis_log[-1]
     st.markdown("### 📊 目前分析報告")
@@ -458,8 +461,6 @@ if st.session_state.analysis_log:
 
     if st.session_state.show_buttons:
         col1, col2 = st.columns(2)
-        
-        # 按鈕 1：修正
         if col1.button("🔄 根據審查意見進行修正"):
             with st.spinner("軍師修正中..."):
                 prompt = f"針對質疑：{latest['critic']}，原始數據：{context_data}，請補強數據並修正報告。"
@@ -468,7 +469,6 @@ if st.session_state.analysis_log:
                 st.session_state.analysis_log.append({"report": new_a, "critic": new_b})
                 st.rerun()
         
-        # 按鈕 2：強制輸出
         if col2.button("✅ 內容無誤，強制輸出 JSON"):
             with st.spinner("最後審計與格式化中..."):
                 prompt = f"將此報告轉換為嚴格的 JSON: {latest['report']}"
@@ -476,7 +476,6 @@ if st.session_state.analysis_log:
                 st.session_state.final_json = final_json
                 st.rerun()
 
-# 最終結果輸出區
 if "final_json" in st.session_state:
     st.success("🎉 決策數據包已產生！")
     st.code(st.session_state.final_json, language='json')
