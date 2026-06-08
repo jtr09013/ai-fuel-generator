@@ -9,11 +9,17 @@ from FinMind.data import DataLoader
 import requests
 
 # --- 初始化 FinMind ---
+# 改用最安全的防呆邏輯，不管 secrets 裡有沒有填 Token 都絕不崩潰
 try:
-    fm_token = st.secrets["FINMIND_TOKEN"]
-    fm = DataLoader()
-    fm.login_by_token(fm_token)
-except:
+    if "FINMIND_TOKEN" in st.secrets and st.secrets["FINMIND_TOKEN"].strip() != "":
+        fm_token = st.secrets["FINMIND_TOKEN"]
+        fm = DataLoader()
+        fm.login_by_token(fm_token)
+    else:
+        fm = DataLoader()
+except Exception as e:
+    # 如果真的登入失敗，強制轉降級免登入模式，並列印訊息在後台
+    print(f"FinMind Token Login Failed, status: bypass. Error: {e}")
     fm = DataLoader()
 
 # --- 核心軍師模組 ---
