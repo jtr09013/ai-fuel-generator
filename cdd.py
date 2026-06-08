@@ -252,7 +252,8 @@ if st.session_state.active_tab == "台股大包":
                 else:
                     res = get_tw_stock_after(t)
                 if res:
-                    name = yf.Ticker(f"{t}.TW").info.get('shortName', f"個股_{t}")
+                    # 修正：不再调用 yf.Ticker(...).info 以避免限流，直接使用股票代号作为名称
+                    name = t  # 直接用代号，例如 "2317"
                     if "盤中即時" in tw_time_mode:
                         watchlist_text += f"{name}({t}): NOW: {res['price']:.2f} | PREV_CLOSE: {res['prev_close']:.2f} | CHG: {res['chg']:+.2f} ({res['pct']:+.2f}%) | EST_VOL: {res['vol']}\n"
                     else:
@@ -493,7 +494,6 @@ if "show_buttons" not in st.session_state:
 
 context_data = st.text_area("請貼入數據燃料包：", height=150)
 
-# 注意：以下 analyst_ai 和 critic_ai 需要定義，但新程式中沒有。為完整移植，加上這兩個函數。
 def search_web(query):
     try:
         with DDGS() as ddgs:
