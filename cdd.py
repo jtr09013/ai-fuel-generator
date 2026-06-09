@@ -43,56 +43,61 @@ st.divider()
 # ==========================================
 @st.cache_data(ttl=300)  # 5分鐘快取
 def get_tw_stock_realtime(ticker):
-    """使用 twstock 取得即時報價 (realtime)"""
+    """使用 twstock 即時報價，失敗時降級至 yfinance"""
     ticker_clean = ticker.split('.')[0]
+    # 1. 嘗試 twstock 即時
     try:
-        # twstock 即時報價
         real = twstock.realtime.get(ticker_clean)
         if real and real.get('success'):
             data = real['realtime']
-            # 最新成交價
             price_str = data.get('latest_trade_price')
             if price_str and price_str != '-':
                 price = float(price_str)
-            else:
-                return None
-            # 成交量 (股數)
-            volume_str = data.get('trade_volume', '0')
-            volume = int(volume_str) if volume_str.isdigit() else 0
-            # 漲跌與漲跌幅（可能需要前日收盤）
-            # 先從歷史資料抓前日收盤
-            stock = twstock.Stock(ticker_clean)
-            # 抓最近5日資料取倒數第二筆收盤
-            # 注意：fetch_from 需要年、月參數，較麻煩，直接使用 stock.data 但需確保有資料
-            # 最簡單：使用 yfinance 備援取得 prev_close
-            prev_close = None
-            try:
-                yf_data = yf.Ticker(f"{ticker_clean}.TW").history(period="2d")
-                if len(yf_data) >= 2:
-                    prev_close = yf_data['Close'].iloc[-2]
-            except:
-                pass
-            if prev_close is None:
-                # 嘗試從 twstock 歷史取得
-                # 載入最近一個月的歷史
-                now = datetime.now()
-                stock.fetch_from(now.year, now.month)
-                if len(stock.data) >= 2:
-                    prev_close = stock.data[-2]['close']
+                volume_str = data.get('trade_volume', '0')
+                volume = int(volume_str) if volume_str.isdigit() else 0
+                # 前日收盤價：從 yfinance 取得
+                yf_ticker = f"{ticker_clean}.TW"
+                yf_stock = yf.Ticker(yf_ticker)
+                hist = yf_stock.history(period="2d")
+                if len(hist) >= 2:
+                    prev_close = hist['Close'].iloc[-2]
                 else:
-                    prev_close = price
-            change = price - prev_close
-            pct = (change / prev_close) * 100 if prev_close != 0 else 0
-            vol_fmt = f"{volume/1000:.2f}萬張" if volume > 0 else "0張"
-            return {
-                "price": price,
-                "prev_close": prev_close,
-                "chg": change,
-                "pct": pct,
-                "vol": vol_fmt
-            }
+                    prev_close = price  # 無法取得則用當前價
+                change = price - prev_close
+                pct = (change / prev_close) * 100 if prev_close != 0 else 0
+                vol_fmt = f"{volume/1000:.2f}萬張" if volume > 0 else "0張"
+                return {
+                    "price": price,
+                    "prev_close": prev_close,
+                    "chg": change,
+                    "pct": pct,
+                    "vol": vol_fmt
+                }
     except Exception as e:
-        st.warning(f"twstock 即時報價 {ticker_clean} 失敗: {e}")
+        st.warning(f"twstock 即時 {ticker_clean} 失敗: {e}")
+    # 2. 備援：yfinance 盤中快照
+    try:
+        yf_ticker = f"{ticker_clean}.TW"
+        stock = yf.Ticker(yf_ticker)
+        hist = stock.history(period="2d")
+        if len(hist) >= 2:
+            prev_close = hist['Close'].iloc[-2]
+            # 使用 fast_info 獲取盤中最新價 (若有)
+            price = stock.fast_info.get('last_price', prev_close)
+            if price > 0:
+                volume = stock.fast_info.get('last_volume', 0)
+                change = price - prev_close
+                pct = (change / prev_close) * 100 if prev_close != 0 else 0
+                vol_fmt = f"{volume/1000:.2f}萬張" if volume > 0 else "0張"
+                return {
+                    "price": price,
+                    "prev_close": prev_close,
+                    "chg": change,
+                    "pct": pct,
+                    "vol": vol_fmt
+                }
+    except Exception as e:
+        st.warning(f"yfinance 備援 {ticker_clean} 失敗: {e}")
     return None
 
 # ==========================================
@@ -100,36 +105,23 @@ def get_tw_stock_realtime(ticker):
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_tw_stock_after(ticker):
-    """使用 twstock 歷史日線取得最近一筆收盤"""
+    """盤後個股：直接使用 yfinance 日線收盤 (更穩定)"""
     ticker_clean = ticker.split('.')[0]
+    yf_ticker = f"{ticker_clean}.TW"
     try:
-        stock = twstock.Stock(ticker_clean)
-        # 抓最近一個月 (簡單抓當月，若當月無資料則抓上月)
-        now = datetime.now()
-        stock.fetch_from(now.year, now.month)
-        if len(stock.data) < 2:
-            # 若當月不足，再抓上個月
-            last_month = now.month - 1 if now.month > 1 else 12
-            last_year = now.year if now.month > 1 else now.year - 1
-            stock.fetch_from(last_year, last_month)
-        if len(stock.data) >= 2:
-            latest = stock.data[-1]
-            prev = stock.data[-2]
-            price = latest['close']
-            prev_close = prev['close']
+        df = yf.Ticker(yf_ticker).history(period="5d")
+        if not df.empty and len(df) >= 2:
+            latest = df.iloc[-1]
+            prev = df.iloc[-2]
+            price = latest['Close']
+            prev_close = prev['Close']
             chg = price - prev_close
             pct = (chg / prev_close) * 100 if prev_close != 0 else 0
-            volume = latest['volume']
+            volume = latest['Volume']
             vol_str = f"{volume/1000:.2f}萬張" if volume >= 10000 else f"{volume:.0f}張"
-            return {
-                "price": price,
-                "prev_close": prev_close,
-                "chg": chg,
-                "pct": pct,
-                "vol": vol_str
-            }
+            return {"price": price, "prev_close": prev_close, "chg": chg, "pct": pct, "vol": vol_str}
     except Exception as e:
-        st.warning(f"twstock 盤後 {ticker_clean} 失敗: {e}")
+        st.warning(f"yfinance 盤後 {ticker_clean} 失敗: {e}")
     return None
 
 # ==========================================
@@ -174,7 +166,7 @@ def get_tw_index_realtime():
 def get_tw_index_after():
     data = {"taiex_p": 0.0, "taiex_c": 0.0, "taiex_pct": 0.0, "taiex_v": "待計算",
             "otc_p": 0.0, "otc_c": 0.0, "otc_pct": 0.0, "otc_v": "待確認"}
-    # 加權指數使用 yfinance (歷史日線)
+    # 加權指數
     try:
         taiex = yf.Ticker("^TWII").history(period="5d")
         if len(taiex) >= 2:
@@ -183,7 +175,7 @@ def get_tw_index_after():
             data["taiex_p"] = latest['Close']
             data["taiex_c"] = latest['Close'] - prev['Close']
             data["taiex_pct"] = (data["taiex_c"] / prev['Close']) * 100
-            data["taiex_v"] = f"{latest['Volume']/1e6:.2f}百萬股" if 'Volume' in latest else "無量"
+            data["taiex_v"] = f"{latest['Volume']/1e6:.2f}百萬股"
     except Exception as e:
         st.warning(f"加權指數盤後抓取失敗: {e}")
     # 櫃買指數
@@ -198,7 +190,6 @@ def get_tw_index_after():
     except:
         pass
     return data
-
 # ==========================================
 # 美股、總經函數 (完全不動，沿用 yfinance)
 # ==========================================
