@@ -2,9 +2,11 @@ import os
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import twstock
 from datetime import datetime, timedelta
 os.environ["ANYIO_BACKEND"] = "asyncio"
+
+# 富果行情 API
+from fugle_marketdata import RestClient
 
 from google import genai
 from google.genai import types
@@ -17,7 +19,7 @@ import requests
 # ==========================================
 st.set_page_config(page_title="AI 數據燃料生產器 v5.0", layout="wide")
 st.title("🚀 AI 財經數據燃料生產器")
-st.caption("台股資料來源：twstock (個股即時/盤後，大盤即時) + yfinance (櫃買指數) | 美股：Yahoo Finance")
+st.caption("台股資料來源：富果 API (即時個股/指數) + yfinance (盤後備援) | 美股：Yahoo Finance")
 
 # ==========================================
 # 上方大按鈕（取代 expander 摺疊）
@@ -39,50 +41,55 @@ with col_tab3:
 st.divider()
 
 # ==========================================
-# 台股即時報價 (使用 twstock)
+# 富果 API 輔助函數
+# ==========================================
+def get_fugle_client():
+    """取得富果 RestClient 實例"""
+    try:
+        api_key = st.secrets["FUGLE_API_KEY"]
+        return RestClient(api_key=api_key)
+    except Exception as e:
+        st.error(f"富果 API 初始化失敗: {e}")
+        return None
+
+# ==========================================
+# 台股即時報價 (使用富果 API)
 # ==========================================
 @st.cache_data(ttl=300)  # 5分鐘快取
 def get_tw_stock_realtime(ticker):
-    """使用 twstock 即時報價，失敗時降級至 yfinance"""
-    ticker_clean = ticker.split('.')[0]
-    # 1. 嘗試 twstock 即時
-    try:
-        real = twstock.realtime.get(ticker_clean)
-        if real and real.get('success'):
-            data = real['realtime']
-            price_str = data.get('latest_trade_price')
-            if price_str and price_str != '-':
-                price = float(price_str)
-                volume_str = data.get('trade_volume', '0')
-                volume = int(volume_str) if volume_str.isdigit() else 0
-                # 前日收盤價：從 yfinance 取得
-                yf_ticker = f"{ticker_clean}.TW"
-                yf_stock = yf.Ticker(yf_ticker)
-                hist = yf_stock.history(period="2d")
-                if len(hist) >= 2:
-                    prev_close = hist['Close'].iloc[-2]
-                else:
-                    prev_close = price  # 無法取得則用當前價
-                change = price - prev_close
-                pct = (change / prev_close) * 100 if prev_close != 0 else 0
-                vol_fmt = f"{volume/1000:.2f}萬張" if volume > 0 else "0張"
-                return {
-                    "price": price,
-                    "prev_close": prev_close,
-                    "chg": change,
-                    "pct": pct,
-                    "vol": vol_fmt
-                }
-    except Exception as e:
-        st.warning(f"twstock 即時 {ticker_clean} 失敗: {e}")
-    # 2. 備援：yfinance 盤中快照
+    """使用富果 API 取得即時報價，失敗時降級至 yfinance"""
+    ticker_clean = ticker.split('.')[0]  # 富果需要純數字代號
+    client = get_fugle_client()
+    if client:
+        try:
+            quote = client.stock.intraday.quote(symbol=ticker_clean)
+            if quote and quote.get('data'):
+                d = quote['data']
+                price = d.get('price')
+                if price and price > 0:
+                    change = d.get('change', 0)
+                    pct = d.get('changePercent', 0)
+                    volume = d.get('volume', 0)
+                    # 富果的 quote 不直接提供前日收盤，需從 change 反推
+                    prev_close = price - change
+                    vol_fmt = f"{volume/1000:.2f}萬張" if volume > 0 else "0張"
+                    return {
+                        "price": price,
+                        "prev_close": prev_close,
+                        "chg": change,
+                        "pct": pct,
+                        "vol": vol_fmt
+                    }
+        except Exception as e:
+            st.warning(f"富果個股 {ticker_clean} 即時報價失敗: {e}，改用備援")
+
+    # 備援：yfinance 盤中快照
     try:
         yf_ticker = f"{ticker_clean}.TW"
         stock = yf.Ticker(yf_ticker)
         hist = stock.history(period="2d")
         if len(hist) >= 2:
             prev_close = hist['Close'].iloc[-2]
-            # 使用 fast_info 獲取盤中最新價 (若有)
             price = stock.fast_info.get('last_price', prev_close)
             if price > 0:
                 volume = stock.fast_info.get('last_volume', 0)
@@ -101,11 +108,11 @@ def get_tw_stock_realtime(ticker):
     return None
 
 # ==========================================
-# 台股盤後報價 (使用 twstock 歷史日線)
+# 台股盤後報價 (直接使用 yfinance 日線，穩定)
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_tw_stock_after(ticker):
-    """盤後個股：直接使用 yfinance 日線收盤 (更穩定)"""
+    """盤後個股：使用 yfinance 日線收盤 (因富果歷史日線需付費，此處保持 yfinance)"""
     ticker_clean = ticker.split('.')[0]
     yf_ticker = f"{ticker_clean}.TW"
     try:
@@ -125,9 +132,7 @@ def get_tw_stock_after(ticker):
     return None
 
 # ==========================================
-# 大盤指數即時 (加權指數 + 櫃買)
-# 加權指數使用 twstock.twse.tx()
-# 櫃買指數 twstock 不支援，改用 yfinance 備援
+# 大盤指數即時 (富果 API 支援 TAIEX / TPEX)
 # ==========================================
 @st.cache_data(ttl=300)
 def get_tw_index_realtime():
@@ -135,38 +140,50 @@ def get_tw_index_realtime():
         "taiex_p": 0.0, "taiex_c": 0.0, "taiex_pct": 0.0, "taiex_v": "查閱盤中",
         "otc_p": 0.0, "otc_c": 0.0, "otc_pct": 0.0, "otc_v": "查閱盤中"
     }
-    # 加權指數
-    try:
-        tx = twstock.twse.tx()
-        data["taiex_p"] = tx.price
-        data["taiex_c"] = tx.change
-        data["taiex_pct"] = tx.change_percent
-        # 成交量無法取得，保留預設文字
-    except Exception as e:
-        st.warning(f"加權指數即時抓取失敗: {e}")
-    # 櫃買指數 (使用 yfinance)
-    try:
-        otc = yf.Ticker("^TWOII")
-        hist = otc.history(period="2d")
-        if len(hist) >= 2:
-            prev_o = hist['Close'].iloc[-2]
-            now_o = hist['Close'].iloc[-1]
-            data["otc_p"] = now_o
-            data["otc_c"] = now_o - prev_o
-            data["otc_pct"] = (data["otc_c"] / prev_o) * 100
-    except Exception as e:
-        st.warning(f"櫃買指數抓取失敗: {e}")
+    client = get_fugle_client()
+    if client:
+        # 加權指數 TAIEX
+        try:
+            taiex_quote = client.stock.intraday.quote(symbol="TAIEX")
+            if taiex_quote and taiex_quote.get('data'):
+                d = taiex_quote['data']
+                data["taiex_p"] = d.get('price', 0)
+                data["taiex_c"] = d.get('change', 0)
+                data["taiex_pct"] = d.get('changePercent', 0)
+        except Exception as e:
+            st.warning(f"富果加權指數即時報價失敗: {e}")
+        # 櫃買指數 TPEX
+        try:
+            tpex_quote = client.stock.intraday.quote(symbol="TPEX")
+            if tpex_quote and tpex_quote.get('data'):
+                d = tpex_quote['data']
+                data["otc_p"] = d.get('price', 0)
+                data["otc_c"] = d.get('change', 0)
+                data["otc_pct"] = d.get('changePercent', 0)
+        except Exception as e:
+            st.warning(f"富果櫃買指數即時報價失敗: {e}")
+    else:
+        # 備援：yfinance (僅櫃買指數，加權指數仍然為0)
+        try:
+            otc = yf.Ticker("^TWOII")
+            hist = otc.history(period="2d")
+            if len(hist) >= 2:
+                prev_o = hist['Close'].iloc[-2]
+                now_o = hist['Close'].iloc[-1]
+                data["otc_p"] = now_o
+                data["otc_c"] = now_o - prev_o
+                data["otc_pct"] = (data["otc_c"] / prev_o) * 100
+        except Exception as e:
+            st.warning(f"櫃買指數備援抓取失敗: {e}")
     return data
 
 # ==========================================
-# 盤後大盤指數 (加權、櫃買)
-# 加權指數用 twstock 歷史? 但 twstock 沒有提供指數歷史，改用 yfinance
+# 盤後大盤指數 (直接使用 yfinance 日線)
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_tw_index_after():
     data = {"taiex_p": 0.0, "taiex_c": 0.0, "taiex_pct": 0.0, "taiex_v": "待計算",
             "otc_p": 0.0, "otc_c": 0.0, "otc_pct": 0.0, "otc_v": "待確認"}
-    # 加權指數
     try:
         taiex = yf.Ticker("^TWII").history(period="5d")
         if len(taiex) >= 2:
@@ -178,7 +195,6 @@ def get_tw_index_after():
             data["taiex_v"] = f"{latest['Volume']/1e6:.2f}百萬股"
     except Exception as e:
         st.warning(f"加權指數盤後抓取失敗: {e}")
-    # 櫃買指數
     try:
         otc = yf.Ticker("^TWOII").history(period="5d")
         if len(otc) >= 2:
@@ -190,8 +206,9 @@ def get_tw_index_after():
     except:
         pass
     return data
+
 # ==========================================
-# 美股、總經函數 (完全不動，沿用 yfinance)
+# 美股、總經函數 (沿用 yfinance，完全不動)
 # ==========================================
 def get_us_index_data():
     indices = {"DOW": "^DJI", "NAS": "^IXIC", "SPX": "^GSPC", "SOX": "^SOX"}
@@ -339,7 +356,7 @@ US_10Y_YIELD: {macro['US10Y']:.2f}%
             st.success("🎉 台股燃料包輸出成功！")
             st.code(output, language="text")
 
-# ----- 頁面2：美股大包 (不變) -----
+# ----- 頁面2：美股大包 (完全不動) -----
 elif st.session_state.active_tab == "美股大包":
     st.header("🇺🇸 美股大盤 + 關注個股")
     us_time_mode = st.radio("美股市場時間狀態", ["☀️ 盤中即時模式 (INTRA)", "🌙 盤後清算模式 (AFTER)"], horizontal=True)
@@ -454,29 +471,24 @@ else:
     if st.button("⚡ 產生單一個股專屬 AI 數據包", type="primary"):
         with st.spinner(f"正在抽取 {single_code} 的獨立數據燃料..."):
             if market == "台灣股市 (TW Stock)":
-                # 使用 twstock 獲取台股資料
+                # 先嘗試富果即時報價，失敗則用 yfinance 盤後
                 res = get_tw_stock_realtime(single_code)
                 if not res:
                     res = get_tw_stock_after(single_code)
                 if res:
-                    # 計算均線需要歷史日線 (從 twstock 歷史)
+                    # 計算均線 (使用 yfinance 歷史日線)
                     ticker_clean = single_code.split('.')[0]
-                    stock = twstock.Stock(ticker_clean)
-                    # 抓最近三個月歷史
-                    now = datetime.now()
-                    stock.fetch_from(now.year, now.month)
-                    # 若不足20筆，再抓上個月
-                    if len(stock.data) < 20:
-                        last_month = now.month - 1 if now.month > 1 else 12
-                        last_year = now.year if now.month > 1 else now.year - 1
-                        stock.fetch_from(last_year, last_month)
-                    if len(stock.data) >= 20:
-                        closes = [d['close'] for d in stock.data[-20:]]
-                        ma5 = sum(closes[-5:])/5
-                        ma20 = sum(closes)/20
-                    else:
+                    yf_ticker = f"{ticker_clean}.TW"
+                    try:
+                        hist = yf.Ticker(yf_ticker).history(period="90d")
+                        if not hist.empty and len(hist) >= 20:
+                            ma5 = hist['Close'].iloc[-5:].mean()
+                            ma20 = hist['Close'].iloc[-20:].mean()
+                        else:
+                            ma5 = ma20 = res['price']
+                    except:
                         ma5 = ma20 = res['price']
-                    news = get_yahoo_news_titles(f"{single_code}.TW", limit=3)
+                    news = get_yahoo_news_titles(yf_ticker, limit=3)
                     news_str = news if news else "無重大新聞"
                     output = f"""<SINGLE_STOCK_ANALYSIS_REQUEST>
 TICKER: {single_code}
