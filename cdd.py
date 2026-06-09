@@ -2,11 +2,10 @@ import os
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import twstock
 from datetime import datetime, timedelta
 os.environ["ANYIO_BACKEND"] = "asyncio"
 
-# FinMind API
-from FinMind.data import DataLoader
 from google import genai
 from google.genai import types
 from openai import OpenAI
@@ -18,7 +17,7 @@ import requests
 # ==========================================
 st.set_page_config(page_title="AI 數據燃料生產器 v5.0", layout="wide")
 st.title("🚀 AI 財經數據燃料生產器")
-st.caption("台股資料來源：FinMind (穩定盤後 + 盤中5分線) | 美股：Yahoo Finance")
+st.caption("台股資料來源：twstock (個股即時/盤後，大盤即時) + yfinance (櫃買指數) | 美股：Yahoo Finance")
 
 # ==========================================
 # 上方大按鈕（取代 expander 摺疊）
@@ -40,108 +39,103 @@ with col_tab3:
 st.divider()
 
 # ==========================================
-# FinMind 初始化與輔助函數
+# 台股即時報價 (使用 twstock)
 # ==========================================
-FINMIND_TOKEN = st.secrets.get("FINMIND_API_TOKEN", "")
-if not FINMIND_TOKEN:
-    st.warning("未設定 FINMIND_API_TOKEN，台股資料將無法取得。請在 .streamlit/secrets.toml 中加入。")
-
-def finmind_request(dataset, **params):
-    """統一的 FinMind API 請求，自動帶入 token"""
-    params["token"] = FINMIND_TOKEN
-    try:
-        data = FinMind.api(dataset=dataset, **params)
-        if isinstance(data, pd.DataFrame) and not data.empty:
-            return data
-        else:
-            return pd.DataFrame()
-    except Exception as e:
-        st.warning(f"FinMind 請求失敗 ({dataset}): {e}")
-        return pd.DataFrame()
-
-# ==========================================
-# 台股即時報價 (使用 FinMind 5分鐘線)
-# ==========================================
-@st.cache_data(ttl=300)  # 5分鐘快取，避免頻繁請求
+@st.cache_data(ttl=300)  # 5分鐘快取
 def get_tw_stock_realtime(ticker):
-    """
-    使用 FinMind 的 TaiwanStockIntraday 取得當日 5 分鐘 K 線最後一筆價格
-    回傳格式與原函數一致
-    """
+    """使用 twstock 取得即時報價 (realtime)"""
     ticker_clean = ticker.split('.')[0]
-    today = datetime.today().strftime("%Y-%m-%d")
-    # 先取當日 5 分線
-    df_intra = finmind_request(
-        dataset="TaiwanStockIntraday",
-        stock_id=ticker_clean,
-        date=today,
-        start_time="09:00:00",
-        end_time="13:30:00"
-    )
-    if not df_intra.empty:
-        # 取最後一筆 (最新)
-        last = df_intra.iloc[-1]
-        price = last.get('close', 0)
-        volume = last.get('volume', 0)
-        # 需要前日收盤價，另外從 TaiwanStockPrice 取得
-        df_daily = finmind_request(
-            dataset="TaiwanStockPrice",
-            stock_id=ticker_clean,
-            start_date=(datetime.today() - timedelta(days=5)).strftime("%Y-%m-%d"),
-            end_date=today
-        )
-        if not df_daily.empty and len(df_daily) >= 2:
-            prev_close = df_daily.iloc[-2]['close']
-        else:
-            prev_close = price  # 無法取得則用當前價
-        change = price - prev_close
-        pct = (change / prev_close) * 100 if prev_close != 0 else 0
-        vol_fmt = f"{volume/1000:.2f}萬張" if volume > 0 else "0張"
-        return {
-            "price": price,
-            "prev_close": prev_close,
-            "chg": change,
-            "pct": pct,
-            "vol": vol_fmt
-        }
-    # 若無當日資料，退而求其次用最近一日日線收盤
-    df_daily = finmind_request(
-        dataset="TaiwanStockPrice",
-        stock_id=ticker_clean,
-        start_date=(datetime.today() - timedelta(days=5)).strftime("%Y-%m-%d"),
-        end_date=today
-    )
-    if not df_daily.empty and len(df_daily) >= 1:
-        last_daily = df_daily.iloc[-1]
-        price = last_daily['close']
-        if len(df_daily) >= 2:
-            prev_close = df_daily.iloc[-2]['close']
-        else:
-            prev_close = price
-        change = price - prev_close
-        pct = (change / prev_close) * 100 if prev_close != 0 else 0
-        volume = last_daily.get('volume', 0)
-        vol_fmt = f"{volume/1000:.2f}萬張" if volume > 0 else "0張"
-        return {
-            "price": price,
-            "prev_close": prev_close,
-            "chg": change,
-            "pct": pct,
-            "vol": vol_fmt
-        }
-    st.error(f"找不到股票 {ticker_clean}")
+    try:
+        # twstock 即時報價
+        real = twstock.realtime.get(ticker_clean)
+        if real and real.get('success'):
+            data = real['realtime']
+            # 最新成交價
+            price_str = data.get('latest_trade_price')
+            if price_str and price_str != '-':
+                price = float(price_str)
+            else:
+                return None
+            # 成交量 (股數)
+            volume_str = data.get('trade_volume', '0')
+            volume = int(volume_str) if volume_str.isdigit() else 0
+            # 漲跌與漲跌幅（可能需要前日收盤）
+            # 先從歷史資料抓前日收盤
+            stock = twstock.Stock(ticker_clean)
+            # 抓最近5日資料取倒數第二筆收盤
+            # 注意：fetch_from 需要年、月參數，較麻煩，直接使用 stock.data 但需確保有資料
+            # 最簡單：使用 yfinance 備援取得 prev_close
+            prev_close = None
+            try:
+                yf_data = yf.Ticker(f"{ticker_clean}.TW").history(period="2d")
+                if len(yf_data) >= 2:
+                    prev_close = yf_data['Close'].iloc[-2]
+            except:
+                pass
+            if prev_close is None:
+                # 嘗試從 twstock 歷史取得
+                # 載入最近一個月的歷史
+                now = datetime.now()
+                stock.fetch_from(now.year, now.month)
+                if len(stock.data) >= 2:
+                    prev_close = stock.data[-2]['close']
+                else:
+                    prev_close = price
+            change = price - prev_close
+            pct = (change / prev_close) * 100 if prev_close != 0 else 0
+            vol_fmt = f"{volume/1000:.2f}萬張" if volume > 0 else "0張"
+            return {
+                "price": price,
+                "prev_close": prev_close,
+                "chg": change,
+                "pct": pct,
+                "vol": vol_fmt
+            }
+    except Exception as e:
+        st.warning(f"twstock 即時報價 {ticker_clean} 失敗: {e}")
     return None
 
 # ==========================================
-# 大盤指數 (加權、櫃買) - 盤中模式
-# 使用 FinMind 的 TaiwanStockIndex 取得最近交易日資料
-# 注意：FinMind 的指數資料為日線，盤中不會更新，但用戶接受 5-10 分鐘延遲，
-# 此處使用當日最後一筆 5 分鐘線來估算？實際指數也提供 5 分鐘線？
-# 為簡化，統一使用最近日線收盤價 (若今日已收盤則今日，否則昨日)
-# 如果要更即時，可改用台灣證券交易所的開盤資訊 api，但易被限流。
-# 因為用戶需求不高，且盤後模式已有日線，盤中模式顯示昨日收盤也能接受。
-# 若用戶希望看到今日盤中變動，可以再調整；但 FinMind 免費版盤中指數不太穩定。
-# 這裡我們直接使用 TaiwanStockIndex 的最後一個交易日資料 (可能是今日或昨日)
+# 台股盤後報價 (使用 twstock 歷史日線)
+# ==========================================
+@st.cache_data(ttl=3600)
+def get_tw_stock_after(ticker):
+    """使用 twstock 歷史日線取得最近一筆收盤"""
+    ticker_clean = ticker.split('.')[0]
+    try:
+        stock = twstock.Stock(ticker_clean)
+        # 抓最近一個月 (簡單抓當月，若當月無資料則抓上月)
+        now = datetime.now()
+        stock.fetch_from(now.year, now.month)
+        if len(stock.data) < 2:
+            # 若當月不足，再抓上個月
+            last_month = now.month - 1 if now.month > 1 else 12
+            last_year = now.year if now.month > 1 else now.year - 1
+            stock.fetch_from(last_year, last_month)
+        if len(stock.data) >= 2:
+            latest = stock.data[-1]
+            prev = stock.data[-2]
+            price = latest['close']
+            prev_close = prev['close']
+            chg = price - prev_close
+            pct = (chg / prev_close) * 100 if prev_close != 0 else 0
+            volume = latest['volume']
+            vol_str = f"{volume/1000:.2f}萬張" if volume >= 10000 else f"{volume:.0f}張"
+            return {
+                "price": price,
+                "prev_close": prev_close,
+                "chg": chg,
+                "pct": pct,
+                "vol": vol_str
+            }
+    except Exception as e:
+        st.warning(f"twstock 盤後 {ticker_clean} 失敗: {e}")
+    return None
+
+# ==========================================
+# 大盤指數即時 (加權指數 + 櫃買)
+# 加權指數使用 twstock.twse.tx()
+# 櫃買指數 twstock 不支援，改用 yfinance 備援
 # ==========================================
 @st.cache_data(ttl=300)
 def get_tw_index_realtime():
@@ -149,99 +143,61 @@ def get_tw_index_realtime():
         "taiex_p": 0.0, "taiex_c": 0.0, "taiex_pct": 0.0, "taiex_v": "查閱盤中",
         "otc_p": 0.0, "otc_c": 0.0, "otc_pct": 0.0, "otc_v": "查閱盤中"
     }
-    today = datetime.today().strftime("%Y-%m-%d")
-    # 加權指數代號 "0000" 代表 TAIEX
-    df_taiex = finmind_request(
-        dataset="TaiwanStockIndex",
-        stock_id="0000",
-        start_date=(datetime.today() - timedelta(days=5)).strftime("%Y-%m-%d"),
-        end_date=today
-    )
-    if not df_taiex.empty:
-        latest = df_taiex.iloc[-1]
-        data["taiex_p"] = latest['close']
-        # 需要前日收盤來計算漲跌
-        if len(df_taiex) >= 2:
-            prev_close = df_taiex.iloc[-2]['close']
-            data["taiex_c"] = latest['close'] - prev_close
-            data["taiex_pct"] = (data["taiex_c"] / prev_close) * 100 if prev_close != 0 else 0
-        else:
-            data["taiex_c"] = 0
-            data["taiex_pct"] = 0
-    # 櫃買指數代號 "OTC" 或 "0020"? 實測為 "0020"
-    df_otc = finmind_request(
-        dataset="TaiwanStockIndex",
-        stock_id="0020",
-        start_date=(datetime.today() - timedelta(days=5)).strftime("%Y-%m-%d"),
-        end_date=today
-    )
-    if not df_otc.empty:
-        latest_o = df_otc.iloc[-1]
-        data["otc_p"] = latest_o['close']
-        if len(df_otc) >= 2:
-            prev_close_o = df_otc.iloc[-2]['close']
-            data["otc_c"] = latest_o['close'] - prev_close_o
-            data["otc_pct"] = (data["otc_c"] / prev_close_o) * 100 if prev_close_o != 0 else 0
+    # 加權指數
+    try:
+        tx = twstock.twse.tx()
+        data["taiex_p"] = tx.price
+        data["taiex_c"] = tx.change
+        data["taiex_pct"] = tx.change_percent
+        # 成交量無法取得，保留預設文字
+    except Exception as e:
+        st.warning(f"加權指數即時抓取失敗: {e}")
+    # 櫃買指數 (使用 yfinance)
+    try:
+        otc = yf.Ticker("^TWOII")
+        hist = otc.history(period="2d")
+        if len(hist) >= 2:
+            prev_o = hist['Close'].iloc[-2]
+            now_o = hist['Close'].iloc[-1]
+            data["otc_p"] = now_o
+            data["otc_c"] = now_o - prev_o
+            data["otc_pct"] = (data["otc_c"] / prev_o) * 100
+    except Exception as e:
+        st.warning(f"櫃買指數抓取失敗: {e}")
     return data
 
 # ==========================================
-# 盤後模式 (使用 FinMind 日線)
+# 盤後大盤指數 (加權、櫃買)
+# 加權指數用 twstock 歷史? 但 twstock 沒有提供指數歷史，改用 yfinance
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_tw_index_after():
     data = {"taiex_p": 0.0, "taiex_c": 0.0, "taiex_pct": 0.0, "taiex_v": "待計算",
             "otc_p": 0.0, "otc_c": 0.0, "otc_pct": 0.0, "otc_v": "待確認"}
-    end_date = datetime.today().strftime("%Y-%m-%d")
-    start_date = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
-    df_taiex = finmind_request(
-        dataset="TaiwanStockIndex",
-        stock_id="0000",
-        start_date=start_date,
-        end_date=end_date
-    )
-    if not df_taiex.empty and len(df_taiex) >= 2:
-        latest = df_taiex.iloc[-1]
-        prev = df_taiex.iloc[-2]
-        data["taiex_p"] = latest['close']
-        data["taiex_c"] = latest['close'] - prev['close']
-        data["taiex_pct"] = (data["taiex_c"] / prev['close']) * 100
-        data["taiex_v"] = f"{latest.get('volume', 0)/1e6:.2f}百萬股" if 'volume' in latest else "無量"
-    df_otc = finmind_request(
-        dataset="TaiwanStockIndex",
-        stock_id="0020",
-        start_date=start_date,
-        end_date=end_date
-    )
-    if not df_otc.empty and len(df_otc) >= 2:
-        lo = df_otc.iloc[-1]
-        po = df_otc.iloc[-2]
-        data["otc_p"] = lo['close']
-        data["otc_c"] = lo['close'] - po['close']
-        data["otc_pct"] = (data["otc_c"] / po['close']) * 100
+    # 加權指數使用 yfinance (歷史日線)
+    try:
+        taiex = yf.Ticker("^TWII").history(period="5d")
+        if len(taiex) >= 2:
+            latest = taiex.iloc[-1]
+            prev = taiex.iloc[-2]
+            data["taiex_p"] = latest['Close']
+            data["taiex_c"] = latest['Close'] - prev['Close']
+            data["taiex_pct"] = (data["taiex_c"] / prev['Close']) * 100
+            data["taiex_v"] = f"{latest['Volume']/1e6:.2f}百萬股" if 'Volume' in latest else "無量"
+    except Exception as e:
+        st.warning(f"加權指數盤後抓取失敗: {e}")
+    # 櫃買指數
+    try:
+        otc = yf.Ticker("^TWOII").history(period="5d")
+        if len(otc) >= 2:
+            lo = otc.iloc[-1]
+            po = otc.iloc[-2]
+            data["otc_p"] = lo['Close']
+            data["otc_c"] = lo['Close'] - po['Close']
+            data["otc_pct"] = (data["otc_c"] / po['Close']) * 100
+    except:
+        pass
     return data
-
-def get_tw_stock_after(ticker):
-    """盤後個股：使用 FinMind 日線收盤"""
-    ticker_clean = ticker.split('.')[0]
-    end_date = datetime.today().strftime("%Y-%m-%d")
-    start_date = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
-    df = finmind_request(
-        dataset="TaiwanStockPrice",
-        stock_id=ticker_clean,
-        start_date=start_date,
-        end_date=end_date
-    )
-    if not df.empty and len(df) >= 2:
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-        price = latest['close']
-        prev_close = prev['close']
-        chg = price - prev_close
-        pct = (chg / prev_close) * 100 if prev_close != 0 else 0
-        volume = latest.get('volume', 0)
-        vol_str = f"{volume/1000:.2f}萬張" if volume >= 10000 else f"{volume:.0f}張"
-        return {"price": price, "prev_close": prev_close, "chg": chg, "pct": pct, "vol": vol_str}
-    return None
 
 # ==========================================
 # 美股、總經函數 (完全不動，沿用 yfinance)
@@ -507,24 +463,26 @@ else:
     if st.button("⚡ 產生單一個股專屬 AI 數據包", type="primary"):
         with st.spinner(f"正在抽取 {single_code} 的獨立數據燃料..."):
             if market == "台灣股市 (TW Stock)":
-                # 使用 FinMind 獲取台股資料
-                res = get_tw_stock_realtime(single_code)  # 盤中模式優先
+                # 使用 twstock 獲取台股資料
+                res = get_tw_stock_realtime(single_code)
                 if not res:
                     res = get_tw_stock_after(single_code)
                 if res:
-                    # 計算均線需要歷史日線
+                    # 計算均線需要歷史日線 (從 twstock 歷史)
                     ticker_clean = single_code.split('.')[0]
-                    end_date = datetime.today().strftime("%Y-%m-%d")
-                    start_date = (datetime.today() - timedelta(days=90)).strftime("%Y-%m-%d")
-                    df_hist = finmind_request(
-                        dataset="TaiwanStockPrice",
-                        stock_id=ticker_clean,
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-                    if not df_hist.empty and len(df_hist) >= 20:
-                        ma5 = df_hist['close'].iloc[-5:].mean()
-                        ma20 = df_hist['close'].iloc[-20:].mean()
+                    stock = twstock.Stock(ticker_clean)
+                    # 抓最近三個月歷史
+                    now = datetime.now()
+                    stock.fetch_from(now.year, now.month)
+                    # 若不足20筆，再抓上個月
+                    if len(stock.data) < 20:
+                        last_month = now.month - 1 if now.month > 1 else 12
+                        last_year = now.year if now.month > 1 else now.year - 1
+                        stock.fetch_from(last_year, last_month)
+                    if len(stock.data) >= 20:
+                        closes = [d['close'] for d in stock.data[-20:]]
+                        ma5 = sum(closes[-5:])/5
+                        ma20 = sum(closes)/20
                     else:
                         ma5 = ma20 = res['price']
                     news = get_yahoo_news_titles(f"{single_code}.TW", limit=3)
